@@ -76,13 +76,56 @@ Binds only what you explicitly list. No inference, no safety net. If you label a
 
 ## Authentik API token
 
-Create a token in Authentik → **Admin Interface → Directory → Tokens → Create**. The user needs full admin access.
+> [!CAUTION]
+> **DO NOT create the token through the Authentik UI.**
+> A confirmed bug in Authentik (tested on 2025.12.1, likely broader) causes the
+> expiration date field to be ignored — tokens created via the UI expire after
+> ~30 minutes regardless of what you set, because the UI falls back to the system
+> session duration. This will silently break authentik-companion until the token
+> is replaced. Use the shell method below instead.
+>
+> Report this upstream: https://github.com/goauthentik/authentik/issues
 
-Store it as a Docker secret:
+### Create the token via the Django shell (required)
+
+Run this on the host where your Authentik container is running:
 
 ```bash
-echo -n "your-token-here" | sudo tee /home/sysadmin/docker/secrets/authentik_token > /dev/null
-sudo chmod 600 /home/sysadmin/docker/secrets/authentik_token
+docker exec authentik ak shell -c "
+from authentik.core.models import Token, TokenIntents, User
+user = User.objects.get(username='akadmin')
+token = Token.objects.create(
+    identifier='authentik-companion',
+    user=user,
+    intent=TokenIntents.INTENT_API,
+    description='token for authentik-companion to access API for stack automation',
+    expiring=False,
+)
+print(token.key)
+" 2>&1 | tail -1
+```
+
+This uses Authentik's built-in Django shell (`ak shell`) — no container modification,
+no image changes. The token is written directly to the database with `expiring=False`
+set at the ORM level, which cannot be overridden by the UI session duration setting.
+
+**Copy the printed token key immediately.** It is only shown once.
+
+If the token already exists from a previous attempt, delete it first:
+
+```bash
+docker exec authentik ak shell -c "
+from authentik.core.models import Token
+Token.objects.filter(identifier='authentik-companion').delete()
+print('deleted')
+" 2>&1 | tail -1
+```
+
+### Store as a Docker secret
+
+```bash
+echo -n "your-token-here" | sudo tee /path/to/docker/secrets/authentik_token > /dev/null
+sudo chmod 600 /path/to/docker/secrets/authentik_token
 ```
 
 ## Deployrr / docker-compose usage
