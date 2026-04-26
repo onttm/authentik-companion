@@ -111,6 +111,24 @@ set at the ORM level, which cannot be overridden by the UI session duration sett
 
 **Copy the printed token key immediately.** It is only shown once.
 
+> [!WARNING]
+> **Do not edit this token through the Authentik UI after creation.**
+> The same bug that breaks expiration on create also triggers on save.
+> Opening the token and clicking Save will overwrite `expiring=False`
+> and silently re-apply the ~30 minute session expiration.
+> The token will appear unchanged in the UI but will stop working shortly after.
+>
+> To update any token field (e.g. description), use the shell:
+> ```bash
+> docker exec authentik ak shell -c "
+> from authentik.core.models import Token
+> t = Token.objects.get(identifier='authentik-companion')
+> t.description = 'updated description'
+> t.save()
+> print('saved, expiring=', t.expiring)
+> " 2>&1 | tail -2
+> ```
+
 If the token already exists from a previous attempt, delete it first:
 
 ```bash
