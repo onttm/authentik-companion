@@ -109,7 +109,7 @@ This uses Authentik's built-in Django shell (`ak shell`) — no container modifi
 no image changes. The token is written directly to the database with `expiring=False`
 set at the ORM level, which cannot be overridden by the UI session duration setting.
 
-**Copy the printed token key immediately.** It is only shown once.
+Copy the printed token key. If you miss it, you can retrieve it later from the Authentik UI under **Admin → Directory → Tokens** — the key is visible there at any time.
 
 > [!WARNING]
 > **Do not edit this token through the Authentik UI after creation.**
