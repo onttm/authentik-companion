@@ -1,9 +1,6 @@
-"""Docker API client — reads container labels via socket-proxy.
-
-Used to correlate a Traefik Host() rule with the authentik access-group
-label declared on the same container. File-provider routers have no
-container and return no label (open-to-all-authenticated default applies).
-"""
+"""Docker API client — reads container labels via socket-proxy to correlate
+Traefik Host() rules with authentik access-group labels.
+File-provider routers have no container, so they return no label (open-to-all default)."""
 
 import logging
 import re
@@ -19,14 +16,11 @@ class DockerClient:
         self.url = url.rstrip("/")
 
     def get_host_access_groups(self, label_key: str) -> dict[str, str]:
-        """Return {host: group_csv} by correlating Traefik Host() labels with label_key.
+        """Return {host: group_csv} by scanning running container labels.
 
-        Scans all running containers. For each container that has label_key set,
-        finds every Traefik rule label on the same container and extracts Host()
-        values — mapping each host to the access group(s) declared for that container.
-
-        Returns empty dict on Docker API error (non-fatal; provisioning continues
-        without access-group binding).
+        For each container with label_key set, extracts every Host() value from
+        Traefik rule labels on the same container and maps it to the access group.
+        Returns empty dict on error — provisioning continues without group binding.
         """
         try:
             resp = requests.get(f"{self.url}/containers/json", timeout=10)

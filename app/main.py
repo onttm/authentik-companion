@@ -125,7 +125,6 @@ def _slug(text: str) -> str:
 
 
 def _resolve_groups(label_value: str) -> list[str]:
-    """Return the list of group names to bind, applying the configured mode."""
     requested = [g.strip() for g in label_value.split(",") if g.strip()]
     if GROUP_MODE != "hierarchical" or not _TIER_ORDER:
         return requested
@@ -139,6 +138,40 @@ def _resolve_groups(label_value: str) -> list[str]:
 
 
 # ── main loop ─────────────────────────────────────────────────────────────────
+
+_REMOVE_PERMISSION_FIX = """\
+docker exec authentik ak shell -c "
+from authentik.core.models import User
+from django.contrib.auth.models import Permission
+user = User.objects.get(username='authentik-companion')
+for app_label, codename in [
+    ('authentik_core',            'delete_application'),
+    ('authentik_providers_proxy', 'delete_proxyprovider'),
+]:
+    user.user_permissions.add(
+        Permission.objects.get(content_type__app_label=app_label, codename=codename)
+    )
+print('done')
+" 2>&1 | tail -1"""
+
+
+def _check_remove_permissions(ak: AuthentikClient) -> None:
+    """Warn if the service account lacks delete permissions required by STALE_ACTION=remove."""
+    log.info("Checking delete permissions for STALE_ACTION=remove...")
+    can_del_app, can_del_provider = ak.check_delete_permissions()
+    missing = []
+    if not can_del_app:
+        missing.append("authentik_core.delete_application")
+    if not can_del_provider:
+        missing.append("authentik_providers_proxy.delete_proxyprovider")
+    if not missing:
+        log.info("  Delete permissions OK")
+        return
+    log.error("STALE_ACTION=remove is set but the service account is missing permissions: %s", ", ".join(missing))
+    log.error("Stale apps will NOT be removed until this is fixed. Run:")
+    log.error(_REMOVE_PERMISSION_FIX)
+    log.error("Then restart authentik-companion.")
+
 
 def run() -> None:
     token   = _load_token()
@@ -168,6 +201,9 @@ def run() -> None:
     auth_flow  = ak.get_flow_uuid(AUTH_FLOW_SLUG)
     inval_flow = ak.get_flow_uuid(INVAL_FLOW_SLUG)
     log.info("  auth_flow=%s  invalidation_flow=%s", auth_flow[:8], inval_flow[:8])
+
+    if STALE_ACTION == "remove":
+        _check_remove_permissions(ak)
 
     if _STANDARD_GROUPS:
         log.info("Ensuring standard groups exist in Authentik...")
@@ -271,7 +307,6 @@ def _poll(
         else:
             log.info("  No access-group label — open to all authenticated users")
 
-        # Clear any stale marker if this host was previously flagged
         stale_since.pop(host, None)
         provisioned.add(host)
         _save_state(provisioned, stale_since)
@@ -284,7 +319,6 @@ def _check_stale(
     active_hosts: set,
     stale_since: dict,
 ) -> None:
-    """Detect stale apps and act according to STALE_ACTION."""
     now = datetime.now(timezone.utc)
 
     for host in list(provisioned):
@@ -294,7 +328,6 @@ def _check_stale(
                 log.info("Host %s is active again — stale marker cleared", host)
             continue
 
-        # Host is absent from Traefik
         if host not in stale_since:
             stale_since[host] = now.isoformat()
             log.warning("Stale: %s disappeared from Traefik", host)
@@ -341,7 +374,7 @@ def _remove_stale_app(
         else:
             provider_pk = app.get("provider")
 
-            # Remove from outpost before deleting provider
+            # Remove from outpost before deleting provider (ordering matters)
             if provider_pk:
                 try:
                     outpost = ak.get_outpost(AUTHENTIK_OUTPOST)
@@ -350,11 +383,10 @@ def _remove_stale_app(
                 except Exception as exc:
                     log.warning("  Could not update outpost: %s", exc)
 
-            # Delete application — policy bindings cascade-delete automatically
             ak.delete_application(app_slug)
             log.info("  Deleted application %s", app_slug)
 
-            # Delete provider (not cascade-deleted with application)
+            # Provider is not cascade-deleted with the application — delete separately
             if provider_pk:
                 try:
                     ak.delete_provider(provider_pk)

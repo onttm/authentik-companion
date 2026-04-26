@@ -110,8 +110,10 @@ for app_label, codename in [
     ('authentik_outposts',        'change_outpost'),
     ('authentik_providers_proxy', 'add_proxyprovider'),
     ('authentik_providers_proxy', 'view_proxyprovider'),
+    ('authentik_providers_proxy', 'delete_proxyprovider'),  # required for STALE_ACTION=remove
     ('authentik_core',            'add_application'),
     ('authentik_core',            'view_application'),
+    ('authentik_core',            'delete_application'),    # required for STALE_ACTION=remove
     ('authentik_core',            'add_group'),
     ('authentik_core',            'view_group'),
     ('authentik_policies',        'add_policybinding'),
@@ -169,6 +171,28 @@ print('deleted')
 " 2>&1 | tail -1
 ```
 
+### Existing install: enable STALE_ACTION=remove
+
+If you installed before v4 and want to switch to `STALE_ACTION=remove`, grant the two additional delete permissions with one `ak shell` command, then restart the companion:
+
+```bash
+docker exec authentik ak shell -c "
+from authentik.core.models import User
+from django.contrib.auth.models import Permission
+user = User.objects.get(username='authentik-companion')
+for app_label, codename in [
+    ('authentik_core',            'delete_application'),
+    ('authentik_providers_proxy', 'delete_proxyprovider'),
+]:
+    user.user_permissions.add(
+        Permission.objects.get(content_type__app_label=app_label, codename=codename)
+    )
+print('done')
+" 2>&1 | tail -1
+```
+
+Then set `STALE_ACTION=remove` in your `.env` and restart the container. On startup, authentik-companion will verify the delete permissions are present and log an error with this same command if they're missing — so you'll always know exactly what to run.
+
 ### Step 2 — Store as a Docker secret
 
 ```bash
@@ -212,24 +236,27 @@ to escalate beyond the default open-to-all-authenticated behavior.
 
 Rather than running under an admin user token, authentik-companion uses a dedicated
 `service_account` user (`authentik-companion`, `is_superuser=False`, unusable password)
-with exactly 11 Django model permissions:
+with exactly 13 Django model permissions:
 
 | Permission | Purpose |
 |---|---|
 | `authentik_flows.view_flow` | Resolve auth/invalidation flow UUIDs on startup |
 | `authentik_outposts.view_outpost` | Find the embedded outpost |
-| `authentik_outposts.change_outpost` | Add providers to outpost |
+| `authentik_outposts.change_outpost` | Add/remove providers from outpost |
 | `authentik_providers_proxy.add_proxyprovider` | Create proxy providers |
 | `authentik_providers_proxy.view_proxyprovider` | Check if provider exists |
+| `authentik_providers_proxy.delete_proxyprovider` | Remove stale providers (`STALE_ACTION=remove`) |
 | `authentik_core.add_application` | Create applications |
 | `authentik_core.view_application` | Check if application exists |
+| `authentik_core.delete_application` | Remove stale applications (`STALE_ACTION=remove`) |
 | `authentik_core.add_group` | Create access groups |
 | `authentik_core.view_group` | Check if group exists |
 | `authentik_policies.add_policybinding` | Bind groups to applications |
 | `authentik_policies.view_policybinding` | Check existing bindings |
 
 A compromised token cannot: create or modify users, reset passwords, access user data,
-create admin backdoors, delete any object, or reach any other part of Authentik.
+create admin backdoors, or reach any other part of Authentik. The delete permissions are
+scoped only to providers and applications — the objects the companion itself creates.
 The service account cannot log in via the Authentik UI (`set_unusable_password`).
 
 Setup uses `ak shell` (Django management shell with direct DB access) — no pre-existing

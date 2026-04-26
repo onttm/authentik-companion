@@ -37,6 +37,22 @@ class AuthentikClient:
         resp = self._s.delete(f"{self.url}{path}", timeout=10)
         resp.raise_for_status()
 
+    # ── permission probing ───────────────────────────────────────────────────
+
+    def check_delete_permissions(self) -> tuple[bool, bool]:
+        """Return (can_delete_application, can_delete_provider).
+
+        Probes with DELETE on a nonexistent resource — 404 = permitted (object
+        missing), 403 = no permission. No side effects.
+        """
+        def probe(path: str) -> bool:
+            return self._s.delete(f"{self.url}{path}", timeout=10).status_code != 403
+
+        return (
+            probe("/api/v3/core/applications/__permission-check__/"),
+            probe("/api/v3/providers/proxy/999999999/"),
+        )
+
     # ── startup discovery ────────────────────────────────────────────────────
 
     def get_flow_uuid(self, slug: str) -> str:
@@ -56,7 +72,6 @@ class AuthentikClient:
     # ── group management ─────────────────────────────────────────────────────
 
     def find_or_create_group(self, name: str) -> str:
-        """Return the UUID of a group, creating it if it doesn't exist."""
         data = self._get("/api/v3/core/groups/", {"search": name})
         for g in data.get("results", []):
             if g["name"] == name:
@@ -68,7 +83,6 @@ class AuthentikClient:
     # ── provider management ──────────────────────────────────────────────────
 
     def find_provider(self, external_host: str) -> int | None:
-        """Return pk of an existing proxy provider for external_host, or None."""
         data = self._get("/api/v3/providers/proxy/", {"search": external_host})
         for p in data.get("results", []):
             if p.get("external_host") == external_host:
@@ -99,7 +113,6 @@ class AuthentikClient:
     # ── application management ───────────────────────────────────────────────
 
     def find_application(self, slug: str) -> str | None:
-        """Return the UUID of an existing application by slug, or None."""
         data = self._get("/api/v3/core/applications/", {"search": slug})
         for a in data.get("results", []):
             if a.get("slug") == slug:
@@ -107,7 +120,6 @@ class AuthentikClient:
         return None
 
     def get_application(self, slug: str) -> dict | None:
-        """Return the full application object by slug, or None."""
         data = self._get("/api/v3/core/applications/", {"search": slug})
         for a in data.get("results", []):
             if a.get("slug") == slug:
@@ -117,18 +129,17 @@ class AuthentikClient:
     def create_application(
         self, name: str, slug: str, provider_pk: int, launch_url: str
     ) -> str:
-        """Create an application and return its UUID."""
         result = self._post("/api/v3/core/applications/", {
             "name": name,
             "slug": slug,
             "provider": provider_pk,
             "meta_launch_url": launch_url,
-            "policy_engine_mode": "any",  # OR logic: user needs to be in ANY bound group
+            "policy_engine_mode": "any",  # OR logic: member of ANY bound group gets access
         })
         return result["pk"]
 
     def delete_application(self, slug: str) -> None:
-        """Delete an application by slug. Policy bindings cascade-delete automatically."""
+        # Policy bindings cascade-delete with the application automatically.
         self._delete(f"/api/v3/core/applications/{slug}/")
 
     # ── outpost management ───────────────────────────────────────────────────
@@ -156,12 +167,8 @@ class AuthentikClient:
     # ── access policy bindings ───────────────────────────────────────────────
 
     def bind_group_to_application(self, app_uuid: str, group_uuid: str) -> None:
-        """Bind a group to an application as an access policy.
-
-        When one or more groups are bound, only members of those groups can
-        access the application (policy_engine_mode=any → OR logic across bindings).
-        No bindings = any authenticated user can access (Authentik default).
-        """
+        # No bindings = any authenticated user can access (Authentik default).
+        # One or more bindings = only members of a bound group can access (OR logic).
         data = self._get("/api/v3/policies/bindings/", {"target": app_uuid})
         for binding in data.get("results", []):
             if binding.get("group") == group_uuid:
