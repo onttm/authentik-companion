@@ -1,4 +1,5 @@
-"""Authentik API client — provisions proxy providers, applications, and outpost membership."""
+"""Authentik API client — provisions proxy providers, applications, outpost membership,
+groups, and application access policy bindings."""
 
 import logging
 import requests
@@ -48,6 +49,18 @@ class AuthentikClient:
                 return outpost
         raise RuntimeError(f"Outpost not found: {name!r}")
 
+    # ── group management ─────────────────────────────────────────────────────
+
+    def find_or_create_group(self, name: str) -> str:
+        """Return the UUID of a group, creating it if it doesn't exist."""
+        data = self._get("/api/v3/core/groups/", {"search": name})
+        for g in data.get("results", []):
+            if g["name"] == name:
+                return g["pk"]
+        result = self._post("/api/v3/core/groups/", {"name": name})
+        log.info("Created group %r (pk=%s)", name, result["pk"][:8])
+        return result["pk"]
+
     # ── per-host provisioning ────────────────────────────────────────────────
 
     def find_provider(self, external_host: str) -> int | None:
@@ -76,20 +89,26 @@ class AuthentikClient:
         })
         return result["pk"]
 
-    def application_exists(self, slug: str) -> bool:
+    def find_application(self, slug: str) -> str | None:
+        """Return the UUID of an existing application by slug, or None."""
         data = self._get("/api/v3/core/applications/", {"search": slug})
-        return any(a.get("slug") == slug for a in data.get("results", []))
+        for a in data.get("results", []):
+            if a.get("slug") == slug:
+                return a["pk"]
+        return None
 
     def create_application(
         self, name: str, slug: str, provider_pk: int, launch_url: str
-    ) -> None:
-        self._post("/api/v3/core/applications/", {
+    ) -> str:
+        """Create an application and return its UUID."""
+        result = self._post("/api/v3/core/applications/", {
             "name": name,
             "slug": slug,
             "provider": provider_pk,
             "meta_launch_url": launch_url,
-            "policy_engine_mode": "any",
+            "policy_engine_mode": "any",  # OR logic: user needs to be in ANY bound group
         })
+        return result["pk"]
 
     def add_provider_to_outpost(self, outpost: dict, provider_pk: int) -> None:
         current = list(outpost.get("providers") or [])
@@ -100,3 +119,26 @@ class AuthentikClient:
             "type": outpost["type"],
             "providers": current + [provider_pk],
         })
+
+    # ── access policy bindings ───────────────────────────────────────────────
+
+    def bind_group_to_application(self, app_uuid: str, group_uuid: str) -> None:
+        """Bind a group to an application as an access policy.
+
+        When one or more groups are bound, only members of those groups can
+        access the application (policy_engine_mode=any → OR logic across bindings).
+        No bindings = any authenticated user can access (Authentik default).
+        """
+        data = self._get("/api/v3/policies/bindings/", {"target": app_uuid})
+        for binding in data.get("results", []):
+            if binding.get("group") == group_uuid:
+                return  # already bound
+        self._post("/api/v3/policies/bindings/", {
+            "target": app_uuid,
+            "group": group_uuid,
+            "enabled": True,
+            "order": 0,
+            "negate": False,
+            "timeout": 30,
+        })
+        log.info("  Bound group %s to application %s", group_uuid[:8], app_uuid[:8])
