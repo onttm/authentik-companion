@@ -7,12 +7,26 @@ For every HTTP router using the configured authentik middleware chain, this serv
   4. Reads the container's authentik.access.group label and binds the named
      group(s) to the application as an access policy
 
-No label on a container = any authenticated user can reach the app (open default).
-Label present = only members of the specified group(s) can reach the app.
+Access group binding modes (AUTHENTIK_GROUP_MODE):
 
-File-provider routers (app-*.yml, no container) get no group binding by default.
+  hierarchical (default, recommended):
+    Label your app with the MINIMUM group that should access it.
+    The companion automatically binds that group AND all higher-privilege
+    groups so they are never accidentally locked out.
 
-Covers both file-provider and Docker-label Traefik routers via the Traefik API.
+      Label: homelab-media  →  binds: homelab-media, homelab-trusted, homelab-admin
+
+    Tier order is defined by the AUTHENTIK_GROUP_* vars (guest → admin).
+    Groups not in the tier list are bound as-is (no upward expansion).
+
+  flat (for Authentik pros only — you have been warned):
+    The companion binds only what you explicitly put in the label.
+    No inference, no safety net. If you label an app homelab-media and
+    forget to list homelab-admin, your admin account cannot access it.
+    Comma-separate for multiple groups: homelab-media,homelab-trusted
+
+No label on a container = open to all authenticated users (Authentik default).
+File-provider routers have no container and get no group binding.
 
 Future: share Traefik discovery with cf-companion for a unified stack-companion.
 """
@@ -45,23 +59,27 @@ AUTH_FLOW_SLUG       = os.environ.get("AUTHENTIK_AUTH_FLOW", "default-authentica
 INVAL_FLOW_SLUG      = os.environ.get("AUTHENTIK_INVALIDATION_FLOW", "default-provider-invalidation-flow")
 POLL_INTERVAL        = int(os.environ.get("POLL_INTERVAL", "60"))
 STATE_FILE           = Path(os.environ.get("STATE_FILE", "/data/provisioned.json"))
-DOCKER_URL           = os.environ.get("DOCKER_URL", "")          # optional: tcp://socket-proxy:2375
+DOCKER_URL           = os.environ.get("DOCKER_URL", "")
 LABEL_KEY            = os.environ.get("AUTHENTIK_LABEL_KEY", "authentik.access.group")
+GROUP_MODE           = os.environ.get("AUTHENTIK_GROUP_MODE", "hierarchical").lower()
 
 _TOKEN_FILE = os.environ.get("AUTHENTIK_TOKEN_FILE", "/run/secrets/authentik_token")
 _TOKEN_ENV  = os.environ.get("AUTHENTIK_TOKEN", "")
 
-# Standard group names — pulled from .env so homelabbers can rename freely.
-# authentik-companion creates any of these that don't exist yet in Authentik.
-# See .env for descriptions of each tier's intended purpose.
-_STANDARD_GROUPS: list[str] = [
+# Tier order: index 0 = lowest privilege, index 3 = highest.
+# In hierarchical mode, labelling an app with tier N automatically binds tiers N..3.
+# Any group name not in this list is bound as-is (custom groups, no expansion).
+_TIER_ORDER: list[str] = [
     g for g in [
-        os.environ.get("AUTHENTIK_GROUP_ADMIN"),
-        os.environ.get("AUTHENTIK_GROUP_TRUSTED"),
-        os.environ.get("AUTHENTIK_GROUP_MEDIA"),
         os.environ.get("AUTHENTIK_GROUP_GUEST"),
+        os.environ.get("AUTHENTIK_GROUP_MEDIA"),
+        os.environ.get("AUTHENTIK_GROUP_TRUSTED"),
+        os.environ.get("AUTHENTIK_GROUP_ADMIN"),
     ] if g
 ]
+
+# Standard groups to ensure exist in Authentik on startup (all four tiers)
+_STANDARD_GROUPS: list[str] = _TIER_ORDER[:]
 
 _DOMAIN_RE = re.compile(r'^([^.]+)\.(.+)$')
 _SLUG_RE   = re.compile(r'[^a-z0-9]+')
@@ -94,6 +112,28 @@ def _slug(text: str) -> str:
     return _SLUG_RE.sub("-", text.lower()).strip("-")
 
 
+def _resolve_groups(label_value: str) -> list[str]:
+    """Return the list of group names to bind, applying the configured mode.
+
+    hierarchical: expands each labeled group to include all higher-privilege tiers.
+    flat:         returns exactly what is in the label — no expansion.
+    """
+    requested = [g.strip() for g in label_value.split(",") if g.strip()]
+
+    if GROUP_MODE != "hierarchical" or not _TIER_ORDER:
+        return requested
+
+    result: set[str] = set()
+    for group in requested:
+        if group in _TIER_ORDER:
+            idx = _TIER_ORDER.index(group)
+            result.update(_TIER_ORDER[idx:])  # this group + all higher tiers
+        else:
+            result.add(group)  # custom group — bind as-is
+
+    return list(result)
+
+
 # ── main loop ─────────────────────────────────────────────────────────────────
 
 def run() -> None:
@@ -108,8 +148,16 @@ def run() -> None:
     log.info("  Outpost:    %s", AUTHENTIK_OUTPOST)
     log.info("  Middleware: %s", AUTHENTIK_MIDDLEWARE)
     log.info("  Interval:   %ds", POLL_INTERVAL)
-    log.info("  Docker:     %s", DOCKER_URL or "disabled (no access-group label reading)")
+    log.info("  Docker:     %s", DOCKER_URL or "disabled")
     log.info("  Label key:  %s", LABEL_KEY)
+
+    if GROUP_MODE == "hierarchical":
+        log.info("  Group mode: hierarchical — label minimum tier, higher tiers auto-included")
+        if _TIER_ORDER:
+            log.info("  Tier order: %s", " → ".join(_TIER_ORDER))
+    else:
+        log.warning("  Group mode: flat — FOR AUTHENTIK PROS ONLY. Higher tiers NOT auto-included.")
+        log.warning("  You are responsible for listing every group in every label. No safety net.")
 
     log.info("Resolving flows and outpost on startup...")
     auth_flow  = ak.get_flow_uuid(AUTH_FLOW_SLUG)
@@ -142,7 +190,6 @@ def _poll(
     inval_flow: str,
     provisioned: set,
 ) -> None:
-    # Refresh label map every poll so new containers are picked up immediately
     host_groups: dict[str, str] = docker.get_host_access_groups(LABEL_KEY) if docker else {}
 
     hosts = traefik.get_protected_hosts(AUTHENTIK_MIDDLEWARE)
@@ -196,18 +243,18 @@ def _poll(
             log.info("  Application slug=%s already exists", app_slug)
 
         # ── outpost ───────────────────────────────────────────────────────────
-        outpost = ak.get_outpost(AUTHENTIK_OUTPOST)  # refresh before patching
+        outpost = ak.get_outpost(AUTHENTIK_OUTPOST)
         ak.add_provider_to_outpost(outpost, provider_pk)
         log.info("  Added provider %d to outpost", provider_pk)
 
         # ── access-group binding ──────────────────────────────────────────────
         access_label = host_groups.get(host, "")
         if access_label:
-            groups = [g.strip() for g in access_label.split(",") if g.strip()]
-            for group_name in groups:
+            groups_to_bind = _resolve_groups(access_label)
+            for group_name in groups_to_bind:
                 group_uuid = ak.find_or_create_group(group_name)
                 ak.bind_group_to_application(app_uuid, group_uuid)
-            log.info("  Access restricted to: %s", ", ".join(groups))
+            log.info("  Access groups bound: %s", ", ".join(groups_to_bind))
         else:
             log.info("  No access-group label — open to all authenticated users")
 
