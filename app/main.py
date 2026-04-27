@@ -198,8 +198,16 @@ def run() -> None:
         log.warning("  Group mode:   flat — FOR AUTHENTIK PROS ONLY. Higher tiers NOT auto-included.")
 
     log.info("Resolving flows and outpost on startup...")
-    auth_flow  = ak.get_flow_uuid(AUTH_FLOW_SLUG)
-    inval_flow = ak.get_flow_uuid(INVAL_FLOW_SLUG)
+    auth_flow = inval_flow = None
+    wait = 10
+    while auth_flow is None:
+        try:
+            auth_flow  = ak.get_flow_uuid(AUTH_FLOW_SLUG)
+            inval_flow = ak.get_flow_uuid(INVAL_FLOW_SLUG)
+        except Exception as exc:
+            log.warning("Authentik not ready (%s) — retrying in %ds...", exc, wait)
+            time.sleep(wait)
+            wait = min(wait * 2, 60)
     log.info("  auth_flow=%s  invalidation_flow=%s", auth_flow[:8], inval_flow[:8])
 
     if STALE_ACTION == "remove":
