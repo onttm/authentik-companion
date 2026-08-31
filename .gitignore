@@ -3,3 +3,6 @@ __pycache__/
 *.pyo
 .env
 data/
+
+# Your own naming config describes your stack — keep it local.
+tools/naming-overrides.json

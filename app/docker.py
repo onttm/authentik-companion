@@ -16,19 +16,23 @@ class DockerClient:
         # requests doesn't support tcp:// — Docker socket-proxies speak plain HTTP
         self.url = url.rstrip("/").replace("tcp://", "http://", 1)
 
-    def get_host_access_groups(self, label_key: str) -> dict[str, str]:
+    def get_host_access_groups(self, label_key: str) -> dict[str, str] | None:
         """Return {host: group_csv} by scanning running container labels.
 
         For each container with label_key set, extracts every Host() value from
         Traefik rule labels on the same container and maps it to the access group.
-        Returns empty dict on error — provisioning continues without group binding.
+
+        Returns None — not {} — when the Docker API is unreachable. The caller must
+        distinguish the two: an empty mapping means "no container asked for a
+        restriction", while None means "we cannot tell", and acting on the latter
+        would provision apps as open-to-all or strip existing group bindings.
         """
         try:
             resp = requests.get(f"{self.url}/containers/json", timeout=10)
             resp.raise_for_status()
         except Exception as exc:
-            log.warning("Docker API unavailable, skipping label read: %s", exc)
-            return {}
+            log.warning("Docker API unavailable: %s", exc)
+            return None
 
         result: dict[str, str] = {}
         for container in resp.json():

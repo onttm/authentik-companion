@@ -1,0 +1,52 @@
+{
+  "_comment": [
+    "Naming configuration for the companion and tools/normalize-names.py.",
+    "Copy to naming-overrides.json and edit — that copy is gitignored, because it",
+    "describes your stack. Put the same file where the container can read it",
+    "(default /data/naming-overrides.json) so newly provisioned apps are compliant.",
+    "",
+    "domains  : apex -> portal section family, and an optional display-name prefix.",
+    "           Usually you want the section OR the prefix, not both: inside an",
+    "           'Acme' section, an app named 'Acme Database' reads as Acme / Acme",
+    "           Database. Applies to hosts you have not configured individually.",
+    "sections : slug -> function. Combined with the family this yields the portal",
+    "           section label, e.g. 'Acme · Media'. Authentik sorts section labels",
+    "           alphabetically, so this gives domain-first, function-second order.",
+    "           UNASSIGNED APPS SORT ABOVE EVERY NAMED SECTION — assign them all.",
+    "overrides: slug -> display name, used VERBATIM. Only needed where the correct",
+    "           name is something no algorithm guesses. Everything else falls back",
+    "           to Title Case of the slug, with known initialisms upper-cased.",
+    "",
+    "Plain JSON. No Claude, no API key, no network."
+  ],
+  "domains": {
+    "example.com": { "group": "Acme", "prefix": "" },
+    "example.org": { "group": "Lab", "prefix": "" }
+  },
+  "sections": {
+    "sonarr": "Media",
+    "radarr": "Media",
+    "qbittorrent": "Downloads",
+    "prometheus": "Monitoring",
+    "uptimekuma": "Monitoring",
+    "unifi": "Network",
+    "wg": "Network",
+    "portainer": "System"
+  },
+  "overrides": {
+    "cloudcmdr": "Cloud Commander",
+    "ddnsupdater": "DDNS Updater",
+    "ha": "Home Assistant",
+    "qbittorrent": "qBittorrent",
+    "qbittorrent-vpn": "qBittorrent (VPN)",
+    "shellinabox": "ShellInABox",
+    "speedtest": "Speedtest Tracker",
+    "unifi": "UniFi",
+    "uptimekuma": "Uptime Kuma",
+    "wg": "WireGuard",
+    "win": "Windows",
+    "win-console": "Windows Console",
+    "win-control": "Windows Control",
+    "wud": "What's Up Docker"
+  }
+}

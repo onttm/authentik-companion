@@ -45,10 +45,19 @@ if group:
     print('Group roles:', list(group.roles.values_list('name', flat=True)))
     role = group.roles.first()
     if role:
-        print('Role perms:', sorted(p.codename for p in role.group.permissions.all()))
+        print('Role perms:', sorted(
+            f'{p.permission.content_type.app_label}.{p.permission.codename}'
+            for p in role.rolemodelpermission_set.all()))
 print('has_perm view_flow:', u.has_perm('authentik_flows.view_flow'))
 " 2>&1 | tail -15
 ```
+
+> [!NOTE]
+> Earlier revisions of this file read role permissions via `role.group.permissions.all()`.
+> `Role` has no `group` field on 2026.8.0 — that call raises
+> `AttributeError: 'Role' object has no attribute 'group'`. Use `rolemodelpermission_set`
+> as above. Likewise `user.user_permissions` is not populated; direct user permissions are
+> not what the API enforces.
 
 ### Test API access from inside the authentik container
 
@@ -105,9 +114,11 @@ wired through an RBAC group/role, every API call returns 403 regardless of what
 the critical part. Key steps:
 1. Create `AKGroup(name='authentik-companion')`
 2. Create `Role(name='authentik-companion')`
-3. If `role.group is None`, create a Django `auth.Group` and link it: `role.group = dj_group; role.save()`
-4. Call `role.assign_perms(list_of_permission_objects)`
-5. `ak_group.roles.add(role)` and `user.ak_groups.add(ak_group)`
+3. Call `role.assign_perms([...])` with permission strings
+4. `ak_group.roles.add(role)` and `user.ak_groups.add(ak_group)`
+
+Do **not** touch `role.group` — that field does not exist on 2026.x and the call raises
+`AttributeError`. See the dedicated failure mode below.
 
 ---
 
@@ -166,6 +177,55 @@ for p in ProxyProvider.objects.filter(external_host='https://your-host.example.c
 
 ---
 
+### Service account setup script fails with `'Role' object has no attribute 'group'`
+
+**Symptom:** the README's Step 1 bootstrap command aborts partway through, on Authentik
+2026.x. The service account may exist with no permissions attached.
+
+**Cause:** the pre-v5 script assigned `role.group` to a `django.contrib.auth.Group`. The RBAC
+`Role` model no longer has that field — permissions are attached with `Role.assign_perms()`
+and read back through `role.rolemodelpermission_set`.
+
+**Fix:** use the v5 script in the README, which passes permission strings to `assign_perms()`.
+It is idempotent, so re-running it over a half-finished account is safe. Verified against
+2026.8.0.
+
+### `REFRESH_ENTRIES` adds groups but never removes them
+
+**Symptom:** narrowing an app's `authentik.access.group` label binds the new group but the old,
+wider group stays bound. Every poll logs:
+
+```
+Reconcile app.example.com: homelab-media should be unbound but delete_policybinding
+is not granted — access NOT revoked
+```
+
+**Cause:** installs created before v5 have 13 permissions; unbinding needs a 14th,
+`authentik_policies.delete_policybinding`.
+
+**Fix:** grant it — see *Existing install: enable REFRESH_ENTRIES* in the README — and restart.
+Until then the app keeps the wider access, which is why this logs at ERROR rather than silently
+carrying on.
+
+### Two hosts on different apexes: `provider with this name already exists`
+
+**Symptom:** on v4 and earlier, a poll cycle dies with:
+
+```
+POST /api/v3/providers/proxy/ → 400: {"name":["provider with this name already exists."]}
+Poll cycle failed: 400 Client Error: Bad Request
+```
+
+and every host after the failing one in that cycle is never provisioned.
+
+**Cause:** the provider name and application slug were both derived from the leftmost label of
+the hostname, so `admin.example.com` and `admin.example.org` collided. Authentik enforces
+provider name uniqueness.
+
+**Fix:** v5 detects both collisions and falls back to the full host
+(`admin.example.org Proxy Provider`, slug `admin-example-org`), and isolates per-host failures
+so one bad host can no longer abort the batch. No action needed beyond upgrading.
+
 ### Application slug mismatch between Traefik hostname and Authentik
 
 **Symptom:**
@@ -175,7 +235,7 @@ POST /api/v3/core/applications/ → 400: {"provider":["Application with this pro
 ```
 
 **Root cause:** The companion derives the application slug from the Traefik hostname
-(e.g. `qbit.distraktr.com` → slug `qbit`). But a manually-created Authentik application
+(e.g. `qbit.example.com` → slug `qbit`). But a manually-created Authentik application
 may use a different slug (e.g. `qbittorrent`). `find_application("qbit")` returns 404,
 so the companion tries to create a new application — which fails because provider pk=11
 is already linked to `qbittorrent`.
@@ -292,10 +352,11 @@ These findings apply to Authentik 2026.2.2. May change in later versions.
 | `GET /api/v3/core/applications/` | **Yes** | Empty results without per-object guardian grants |
 | `GET /api/v3/core/applications/{slug}/` | No | Direct retrieve bypasses list filter |
 
-**RBAC role creation gotcha:** `Role.objects.create()` or `get_or_create()` does NOT
-automatically create the backing Django `auth.Group`. You must create it manually and
-link it: `role.group = dj_group; role.save()`. Without this, `role.group` is None and
-`role.assign_perms()` raises `AttributeError: 'NoneType' object has no attribute 'permissions'`.
+**RBAC role creation gotcha (pre-2026.x only):** older Authentik backed each `Role` with a
+Django `auth.Group` that had to be created and linked by hand. **That field is gone as of
+2026.8.0** — `Role` has no `group` attribute, and `Role.objects.get_or_create()` is all you
+need. Permissions are attached with `role.assign_perms([...])` and read back through
+`role.rolemodelpermission_set`. Verified on 2026.8.0.
 
 **`assign_perms` signature:** Takes `Permission` objects or `"app_label.codename"` strings,
 plus an optional `obj` for object-level grants. Pass `obj=None` (default) for model-level
